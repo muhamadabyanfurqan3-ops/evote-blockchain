@@ -1,0 +1,88 @@
+version: "3.8"
+
+networks:
+  evoting-net:
+    driver: bridge
+
+services:
+  coordinator:
+    build: .
+    container_name: evoting-coordinator
+    ports:
+      - "5000:5000"
+    command: python -m coordinator --port 5000
+    networks:
+      - evoting-net
+    depends_on:
+      - worker-1
+      - worker-2
+      - worker-3
+      - worker-4
+      - worker-5
+      - worker-6
+
+  worker-1:
+    build: .
+    container_name: evoting-worker-1
+    ports:
+      - "5001:5001"
+    command: python -m worker --port 5001 --node-id worker-1
+    volumes:
+      - ./data/worker-1:/app/data
+    networks:
+      - evoting-net
+
+  worker-2:
+    build: .
+    container_name: evoting-worker-2
+    ports:
+      - "5002:5002"
+    command: python -m worker --port 5002 --node-id worker-2
+    volumes:
+      - ./data/worker-2:/app/data
+    networks:
+      - evoting-net
+
+  worker-3:
+    build: .
+    container_name: evoting-worker-3
+    ports:
+      - "5003:5003"
+    command: python -m worker --port 5003 --node-id worker-3
+    volumes:
+      - ./data/worker-3:/app/data
+    networks:
+      - evoting-net
+
+  worker-4:
+    build: .
+    container_name: evoting-worker-4
+    ports:
+      - "5004:5004"
+    command: python -m worker --port 5004 --node-id worker-4
+    volumes:
+      - ./data/worker-4:/app/data
+    networks:
+      - evoting-net
+
+  worker-5:
+    build: .
+    container_name: evoting-worker-5
+    ports:
+      - "5005:5005"
+    command: python -m worker --port 5005 --node-id worker-5
+    volumes:
+      - ./data/worker-5:/app/data
+    networks:
+      - evoting-net
+
+  worker-6:
+    build: .
+    container_name: evoting-worker-6
+    ports:
+      - "5006:5006"
+    command: python -m worker --port 5006 --node-id worker-6
+    volumes:
+      - ./data/worker-6:/app/data
+    networks:
+      - evoting-net
