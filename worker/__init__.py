@@ -1,25 +1,24 @@
 """
 Worker Module: REST API Worker Node & Mining Service
-Penanggung Jawab: Abyan
+Penanggung Jawab: Abyan (Diintegrasikan dengan Core oleh Safid)
 Mata Kuliah: Komputasi Paralel dan Terdistribusi (KPT)
 """
 
 import argparse
-import sys
-import uuid
+from typing import Any, Dict
 from flask import Flask, jsonify, request
-from core import Blockchain
+from core import Block, Blockchain, broadcast_block, resolve_conflicts
 
 
 def create_worker_app(node_id: str, difficulty: int = 4) -> Flask:
     """Application Factory untuk menginisialisasi Worker Node Flask."""
     app = Flask(__name__)
-    blockchain = Blockchain(node_identifier=node_id, difficulty=difficulty)
+    blockchain = Blockchain(node_id=node_id, difficulty=difficulty)
 
     @app.route("/", methods=["GET"])
     def home():
         return jsonify({
-            "service": "Worker Node E-Voting",
+            "service": "Worker Node E-Voting Blockchain",
             "node_id": node_id,
             "status": "online",
             "endpoints": [
@@ -28,7 +27,8 @@ def create_worker_app(node_id: str, difficulty: int = 4) -> Flask:
                 "/mine",
                 "/transactions/new",
                 "/nodes/register",
-                "/nodes/resolve"
+                "/nodes/resolve",
+                "/nodes/receive_block",
             ]
         }), 200
 
@@ -38,102 +38,131 @@ def create_worker_app(node_id: str, difficulty: int = 4) -> Flask:
         return jsonify({
             "node_id": node_id,
             "chain_length": len(blockchain.chain),
-            "pending_votes": len(blockchain.current_votes),
+            "last_block_hash": blockchain.last_block.hash,
+            "pending_votes": len(blockchain.pending_votes),
             "difficulty": blockchain.difficulty,
-            "peers_count": len(blockchain.nodes),
-            "peers": list(blockchain.nodes),
+            "peers_count": len(blockchain.peers),
+            "peers": list(blockchain.peers),
         }), 200
 
     @app.route("/chain", methods=["GET"])
     def get_full_chain():
         """Mengembalikan seluruh rantai blok saat ini pada worker lokal."""
-        response = {
+        return jsonify({
             "node_id": node_id,
             "chain": [block.to_dict() for block in blockchain.chain],
             "length": len(blockchain.chain),
-        }
-        return jsonify(response), 200
+        }), 200
 
     @app.route("/transactions/new", methods=["POST"])
     def add_transaction():
         """
         Menerima transaksi suara baru dari Coordinator atau pemilih.
-        Format JSON yang diharapkan:
-        {
-            "voter_id": "VOTER-12345",
-            "candidate_id": "CANDIDATE-01"
-        }
+        Mendukung key 'kandidat' maupun 'candidate_id'.
+        Menerapkan validasi Anti Double-Voting.
         """
         values = request.get_json(force=True, silent=True)
         if not values:
             return jsonify({"error": "Body JSON tidak valid atau kosong"}), 400
 
-        required_fields = ["voter_id", "candidate_id"]
-        if not all(k in values for k in required_fields):
-            return jsonify({"error": "Data tidak lengkap, wajib memiliki voter_id dan candidate_id"}), 400
+        voter_id = values.get("voter_id")
+        kandidat = values.get("kandidat") or values.get("candidate_id")
 
-        # Cek apakah pemilih sudah pernah memilih di pending pool atau di dalam rantai blok
-        voter_id = values["voter_id"]
-        for block in blockchain.chain:
-            for vote in block.votes:
-                if vote.get("voter_id") == voter_id:
-                    return jsonify({"error": f"Voter {voter_id} sudah memberikan suara pada blok #{block.index}"}), 409
+        if not voter_id or not kandidat:
+            return jsonify({
+                "error": "Data tidak lengkap: wajib menyediakan 'voter_id' dan 'kandidat' (atau 'candidate_id')."
+            }), 400
 
-        for vote in blockchain.current_votes:
-            if vote.get("voter_id") == voter_id:
-                return jsonify({"error": f"Voter {voter_id} sudah berada dalam antrean pending votes"}), 409
+        # Panggil validasi Anti Double-Voting di Core Blockchain
+        success, message = blockchain.add_vote(voter_id=str(voter_id), kandidat=str(kandidat))
 
-        index = blockchain.new_vote(
-            voter_id=voter_id,
-            candidate_id=values["candidate_id"],
-        )
+        if not success:
+            # Kode 409 Conflict untuk penolakan double voting
+            return jsonify({
+                "error": message,
+                "voter_id": voter_id,
+                "status": "rejected"
+            }), 409
 
         return jsonify({
-            "message": f"Suara berhasil dicatat ke dalam pending mempool",
-            "block_target_index": index,
-            "voter_id": voter_id
+            "message": message,
+            "voter_id": voter_id,
+            "kandidat": kandidat,
+            "target_block_index": blockchain.last_block.index + 1,
+            "status": "accepted"
         }), 201
 
     @app.route("/mine", methods=["GET"])
     def mine():
         """
-        Menjalankan algoritma Proof-of-Work untuk menambang blok baru
-        berisi transaksi suara yang ada di pending pool.
+        Menjalankan algoritma Proof-of-Work SHA-256 untuk menambang blok baru
+        dari antrean pending mempool.
         """
-        if not blockchain.current_votes:
+        new_block, message = blockchain.mine_pending_votes(miner_id=node_id)
+        if new_block is None:
             return jsonify({
-                "message": "Tidak ada transaksi suara baru di pending pool untuk ditambang.",
-                "pending_count": 0
+                "message": message,
+                "pending_count": 0,
+                "status": "idle"
             }), 200
 
-        last_block = blockchain.last_block
-        last_proof = last_block.proof
-        previous_hash = last_block.hash
+        # Sebarkan blok yang baru ditambang ke seluruh peer terdaftar (Block Propagation)
+        propagation_results = {}
+        if blockchain.peers:
+            propagation_results = broadcast_block(new_block, list(blockchain.peers))
 
-        # Jalankan kalkulasi PoW
-        proof = blockchain.proof_of_work(last_proof, previous_hash)
+        return jsonify({
+            "message": message,
+            "block": new_block.to_dict(),
+            "propagation": propagation_results,
+            "status": "mined"
+        }), 200
 
-        # Buat blok baru dan rekam ke rantai
-        block = blockchain.create_block(proof, previous_hash)
+    @app.route("/nodes/receive_block", methods=["POST"])
+    def receive_block():
+        """
+        Menerima blok baru hasil propagasi dari worker node lain.
+        Jika blok valid dan berurutan langsung ditambahkan ke rantai lokal.
+        """
+        block_data = request.get_json(force=True, silent=True)
+        if not block_data:
+            return jsonify({"error": "Payload blok kosong"}), 400
 
-        response = {
-            "message": f"Blok baru berhasil ditambang oleh {node_id}!",
-            "index": block.index,
-            "votes": block.votes,
-            "proof": block.proof,
-            "previous_hash": block.previous_hash,
-            "hash": block.hash,
-        }
-        return jsonify(response), 200
+        try:
+            incoming_block = Block.from_dict(block_data)
+        except Exception as e:
+            return jsonify({"error": f"Format blok tidak valid: {e}"}), 400
+
+        with blockchain._lock:
+            # Periksa apakah blok ini merupakan penerus sah dari last_block lokal
+            if blockchain.is_valid_block(incoming_block, blockchain.last_block):
+                blockchain.chain.append(incoming_block)
+                # Bersihkan pending votes lokal yang sudah ada di blok baru
+                voted_ids = {v.get("voter_id") for v in incoming_block.votes if v.get("voter_id")}
+                blockchain.pending_votes = [
+                    v for v in blockchain.pending_votes if v.get("voter_id") not in voted_ids
+                ]
+                blockchain.storage.save_state(
+                    blockchain.chain, blockchain.pending_votes, blockchain.peers
+                )
+                return jsonify({
+                    "message": f"Blok #{incoming_block.index} berhasil diterima dan ditambahkan ke ledger.",
+                    "chain_length": len(blockchain.chain)
+                }), 200
+
+        # Jika tidak cocok langsung, jalankan konsensus untuk rekonsiliasi
+        resolve_conflicts(blockchain)
+        return jsonify({
+            "message": "Blok tidak cocok langsung dengan puncak rantai lokal. Telah memicu konsensus.",
+            "chain_length": len(blockchain.chain)
+        }), 202
 
     @app.route("/nodes/register", methods=["POST"])
     def register_nodes():
         """
         Mendaftarkan daftar peer worker node baru.
-        Format JSON yang diharapkan:
-        {
-            "nodes": ["http://127.0.0.1:5002", "http://127.0.0.1:5003"]
-        }
+        Format JSON:
+        { "nodes": ["http://worker-2:5002", "http://worker-3:5003"] }
         """
         values = request.get_json(force=True, silent=True)
         if not values or "nodes" not in values:
@@ -141,32 +170,24 @@ def create_worker_app(node_id: str, difficulty: int = 4) -> Flask:
 
         nodes = values["nodes"]
         for node in nodes:
-            try:
-                blockchain.register_node(node)
-            except ValueError as e:
-                return jsonify({"error": str(e)}), 400
+            blockchain.register_peer(node)
 
         return jsonify({
-            "message": "Node peer berhasil didaftarkan.",
-            "total_nodes": list(blockchain.nodes)
+            "message": "Daftar peer berhasil didaftarkan.",
+            "total_peers": len(blockchain.peers),
+            "peers": list(blockchain.peers)
         }), 201
 
     @app.route("/nodes/resolve", methods=["GET"])
     def consensus():
-        """Menjalankan algoritma konsensus untuk resolusi konflik antar-peer."""
-        replaced = blockchain.resolve_conflicts()
-        if replaced:
-            response = {
-                "message": "Rantai lokal digantikan dengan rantai konsensus terpanjang.",
-                "new_chain_length": len(blockchain.chain),
-                "chain": [b.to_dict() for b in blockchain.chain]
-            }
-        else:
-            response = {
-                "message": "Rantai lokal sudah mutakhir dan berstatus authoritative.",
-                "chain_length": len(blockchain.chain)
-            }
-        return jsonify(response), 200
+        """Menjalankan algoritma konsensus Longest Valid Chain antar-peer."""
+        replaced, message = resolve_conflicts(blockchain)
+        return jsonify({
+            "replaced": replaced,
+            "message": message,
+            "chain_length": len(blockchain.chain),
+            "last_block_hash": blockchain.last_block.hash
+        }), 200
 
     return app
 

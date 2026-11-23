@@ -247,17 +247,29 @@ def create_coordinator_app(workers: List[str] = None) -> Flask:
         """
         Menerima suara dari pemilih dan menyebarkan (broadcast)
         ke antrean mempool seluruh worker nodes.
+        Mendukung key 'kandidat' maupun 'candidate_id'.
         """
         payload = request.get_json(force=True, silent=True)
-        if not payload or "voter_id" not in payload or "candidate_id" not in payload:
-            return jsonify({"error": "Data voter_id dan candidate_id wajib diisi"}), 400
+        if not payload:
+            return jsonify({"error": "Payload JSON kosong atau tidak valid"}), 400
+
+        voter_id = payload.get("voter_id")
+        kandidat = payload.get("kandidat") or payload.get("candidate_id")
+        if not voter_id or not kandidat:
+            return jsonify({"error": "Data voter_id dan kandidat (atau candidate_id) wajib diisi"}), 400
+
+        normalized_payload = {
+            "voter_id": str(voter_id).strip(),
+            "kandidat": str(kandidat).strip(),
+            "candidate_id": str(kandidat).strip(),
+        }
 
         success_workers = []
         errors = []
 
         for url in worker_nodes:
             try:
-                res = requests.post(f"{url}/transactions/new", json=payload, timeout=2)
+                res = requests.post(f"{url}/transactions/new", json=normalized_payload, timeout=2)
                 if res.status_code == 201:
                     success_workers.append(url)
                 elif res.status_code == 409:
@@ -318,7 +330,7 @@ def create_coordinator_app(workers: List[str] = None) -> Flask:
 
         for block in longest_chain:
             for vote in block.get("votes", []):
-                cand_id = vote.get("candidate_id")
+                cand_id = vote.get("kandidat") or vote.get("candidate_id")
                 if cand_id:
                     tally[cand_id] = tally.get(cand_id, 0) + 1
                     total_votes += 1
