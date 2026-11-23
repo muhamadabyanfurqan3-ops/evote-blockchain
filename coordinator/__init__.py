@@ -249,13 +249,13 @@ def create_coordinator_app(workers: List[str] = None) -> Flask:
         ke antrean mempool seluruh worker nodes.
         Mendukung key 'kandidat' maupun 'candidate_id'.
         """
-        payload = request.get_json(force=True, silent=True)
+        payload = request.get_json(silent=True)
         if not payload:
             return jsonify({"error": "Payload JSON kosong atau tidak valid"}), 400
 
         voter_id = payload.get("voter_id")
         kandidat = payload.get("kandidat") or payload.get("candidate_id")
-        if not voter_id or not kandidat:
+        if not isinstance(voter_id, (str, int)) or not str(voter_id).strip() or not isinstance(kandidat, str) or not kandidat.strip():
             return jsonify({"error": "Data voter_id dan kandidat (atau candidate_id) wajib diisi"}), 400
 
         normalized_payload = {
@@ -283,7 +283,7 @@ def create_coordinator_app(workers: List[str] = None) -> Flask:
             return jsonify({"error": "Semua worker node gagal menerima transaksi suara", "details": errors}), 502
 
         return jsonify({
-            "message": f"Suara pemilih {payload['voter_id']} berhasil dibroadcast ke {len(success_workers)} worker nodes.",
+            "message": f"Suara pemilih {normalized_payload['voter_id']} berhasil dibroadcast ke {len(success_workers)} worker nodes.",
             "success_nodes": success_workers
         }), 200
 
@@ -330,6 +330,8 @@ def create_coordinator_app(workers: List[str] = None) -> Flask:
 
         for block in longest_chain:
             for vote in block.get("votes", []):
+                if vote.get("voter_id") == "SYSTEM_GENESIS":
+                    continue
                 cand_id = vote.get("kandidat") or vote.get("candidate_id")
                 if cand_id:
                     tally[cand_id] = tally.get(cand_id, 0) + 1

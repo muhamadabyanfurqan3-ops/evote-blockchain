@@ -25,7 +25,8 @@ def create_worker_app(node_id: str, difficulty: int = 4) -> Flask:
                 "/status",
                 "/chain",
                 "/mine",
-                "/transactions/new",
+                "/vote",
+                "/transactions/new (alias)",
                 "/nodes/register",
                 "/nodes/resolve",
                 "/nodes/receive_block",
@@ -54,6 +55,7 @@ def create_worker_app(node_id: str, difficulty: int = 4) -> Flask:
             "length": len(blockchain.chain),
         }), 200
 
+    @app.route("/vote", methods=["POST"])
     @app.route("/transactions/new", methods=["POST"])
     def add_transaction():
         """
@@ -61,14 +63,14 @@ def create_worker_app(node_id: str, difficulty: int = 4) -> Flask:
         Mendukung key 'kandidat' maupun 'candidate_id'.
         Menerapkan validasi Anti Double-Voting.
         """
-        values = request.get_json(force=True, silent=True)
+        values = request.get_json(silent=True)
         if not values:
             return jsonify({"error": "Body JSON tidak valid atau kosong"}), 400
 
         voter_id = values.get("voter_id")
         kandidat = values.get("kandidat") or values.get("candidate_id")
 
-        if not voter_id or not kandidat:
+        if not isinstance(voter_id, (str, int)) or not str(voter_id).strip() or not isinstance(kandidat, str) or not kandidat.strip():
             return jsonify({
                 "error": "Data tidak lengkap: wajib menyediakan 'voter_id' dan 'kandidat' (atau 'candidate_id')."
             }), 400
@@ -169,8 +171,11 @@ def create_worker_app(node_id: str, difficulty: int = 4) -> Flask:
             return jsonify({"error": "Harap sediakan list 'nodes' yang valid"}), 400
 
         nodes = values["nodes"]
+        if not isinstance(nodes, list) or not nodes or any(not isinstance(node, str) or not node.strip() for node in nodes):
+            return jsonify({"error": "'nodes' harus berupa list URL peer yang tidak kosong"}), 400
+
         for node in nodes:
-            blockchain.register_peer(node)
+            blockchain.register_peer(node.strip())
 
         return jsonify({
             "message": "Daftar peer berhasil didaftarkan.",
